@@ -1,0 +1,8 @@
+services:
+  discovery:
+    ports:
+      - "8761:8761"
+
+  webui:
+    ports:
+      - "8080:8080"

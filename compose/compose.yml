@@ -1,12 +1,12 @@
+version: "3.9"
+
 volumes:
-  # geowebcache tiles shared volume
   geowebcache_data:
-  # geoserver data files shared volume (not datadir, data)
   geoserver_data:
 
 include:
   - ./infra.yml
-  
+
 x-gs-dependencies: &gs-dependencies
   rabbitmq:
     condition: service_healthy
@@ -25,6 +25,23 @@ x-gs-dependencies: &gs-dependencies
     required: true
 
 services:
+  # --- MinIO como S3 local ---
+  minio:
+    image: quay.io/minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Inicialización de datos ---
   init-test-data:
     image: alpine:3.18.4
     user: root
@@ -32,68 +49,75 @@ services:
       - geoserver_data:/mnt/geoserver_data
       - geowebcache_data:/mnt/geowebcache_data
       - ./sampledata.tgz:/tmp/sampledata.tgz
-    command: sh -c "chown -R ${GS_USER} /mnt/geoserver_data /mnt/geowebcache_data && cd /mnt/geoserver_data && if [ ! -d sampledata ]; then tar xvzf /tmp/sampledata.tgz && chown -R ${GS_USER} sampledata; fi"
+    command: >
+      sh -c "chown -R ${GS_USER} /mnt/geoserver_data /mnt/geowebcache_data &&
+             cd /mnt/geoserver_data &&
+             if [ ! -d sampledata ]; then tar xvzf /tmp/sampledata.tgz && chown -R ${GS_USER} sampledata; fi"
 
+  # --- ACL Service ---
   acl:
     image: ${ACL_REPOSITORY}/geoserver-acl:${ACL_TAG}
     environment:
-      # Override default values in the container's /etc/geoserver/acl-service.yml 
-      - PG_HOST=geodatabase
-      - PG_PORT=5432
-      - PG_DB=geoserver
-      - PG_SCHEMA=acl
-      - PG_USERNAME=geoserver
-      - PG_PASSWORD=geoserver
-      - 'ACL_USERS_ADMIN_PASSWORD={noop}s3cr3t'
-      - 'ACL_USERS_GEOSERVER_PASSWORD={noop}s3cr3t'
-      - GEOSERVER_BUS_ENABLED=true
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=guest
-      - RABBITMQ_PASSWORD=guest
-      #- RABBITMQ_VHOST=""
-      #- SPRING_PROFILES_ACTIVE=logging_debug,logging_debug_events
+      PG_HOST: geodatabase
+      PG_PORT: 5432
+      PG_DB: geoserver
+      PG_SCHEMA: acl
+      PG_USERNAME: geoserver
+      PG_PASSWORD: geoserver
+      ACL_USERS_ADMIN_PASSWORD: "{noop}s3cr3t"
+      ACL_USERS_GEOSERVER_PASSWORD: "{noop}s3cr3t"
+      GEOSERVER_BUS_ENABLED: "true"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
     depends_on:
       geodatabase:
         condition: service_started
-        required: true
       rabbitmq:
         condition: service_healthy
-        required: true
     deploy:
       resources:
         limits:
           cpus: '4.0'
           memory: 2G
 
-  # Spring Cloud Config service, provides centralized configuration to all
-  # microservices. Being a Discovery First Bootstrap configuration, it'll
-  # register itself with the Eureka discovery service and can be scaled
+  # --- Config Service ---
   config:
     image: ${REPOSITORY}/geoserver-cloud-config:${TAG}
     user: ${GS_USER}
     environment:
       JAVA_OPTS: "${JAVA_OPTS_DEFAULT}"
       SPRING_PROFILES_ACTIVE: "${CONFIG_SERVER_DEFAULT_PROFILES}"
-  #  restart: unless-stopped
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     volumes:
-      # override with the local copy to test config changes during development
-      - $PWD/../config:/etc/geoserver:ro
+      - ../config:/etc/geoserver:ro
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 256M
 
-  # Eureka service discovery. This is a Discovery First Bootstrap configuration.
-  # The discovery service is the only fixed entry point.
-  # Browse to http://localhost:8761 to check all services are registered.
+  # --- Eureka Discovery Service ---
   discovery:
     image: ${REPOSITORY}/geoserver-cloud-discovery:${TAG}
     user: ${GS_USER}
     environment:
       JAVA_OPTS: "${JAVA_OPTS_DEFAULT}"
       SPRING_PROFILES_ACTIVE: "${DISCOVERY_SERVER_DEFAULT_PROFILES}"
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     restart: unless-stopped
     depends_on:
       - config
@@ -102,9 +126,8 @@ services:
         limits:
           cpus: '2.0'
           memory: 512M
-    
-  # Application facade, provides a single entry point routing to all
-  # microservices (e.g. http://localhost:9090/geoserver/wms, http://localhost:9090/geoserver/wfs, etc)
+
+  # --- Gateway ---
   gateway:
     image: ${REPOSITORY}/geoserver-cloud-gateway:${TAG}
     user: ${GS_USER}
@@ -113,9 +136,15 @@ services:
         condition: service_healthy
     environment:
       JAVA_OPTS: "${JAVA_OPTS_DEFAULT}"
-      # eat our own dogfood and set a base path
       GEOSERVER_BASE_PATH: ${GEOSERVER_BASE_PATH}
       SPRING_PROFILES_ACTIVE: "${GATEWAY_DEFAULT_PROFILES}"
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     ports:
       - ${GATEWAY_PORT}:8080
     deploy:
@@ -124,18 +153,35 @@ services:
           cpus: '4.0'
           memory: 2G
 
+  # --- Servicios GeoServer ---
   wfs:
     extends:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-wfs:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
 
   wms:
-    image: ${REPOSITORY}/geoserver-cloud-wms:${TAG}
     extends:
       file: templates.yml
       service: gstemplate
+    image: ${REPOSITORY}/geoserver-cloud-wms:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
 
   wcs:
@@ -143,6 +189,14 @@ services:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-wcs:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
 
   wps:
@@ -150,6 +204,14 @@ services:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-wps:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
 
   gwc:
@@ -157,6 +219,14 @@ services:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-gwc:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
     deploy:
       resources:
@@ -169,6 +239,14 @@ services:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-rest:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
 
   webui:
@@ -176,5 +254,12 @@ services:
       file: templates.yml
       service: gstemplate
     image: ${REPOSITORY}/geoserver-cloud-webui:${TAG}
+    environment:
+      GEOSERVER_DATA_DIR: s3://geoserver
+      GS_S3_ENDPOINT: http://minio:9000
+      GS_S3_BUCKET: geoserver
+      GS_S3_ACCESS_KEY: minioadmin
+      GS_S3_SECRET_KEY: minioadmin
+      GS_S3_REGION: us-east-1
+      GS_S3_USE_PATH_STYLE: "true"
     depends_on: *gs-dependencies
-

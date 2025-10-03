@@ -160,3 +160,11 @@ $ curl -u admin:geoserver "http://localhost:9090/geoserver/cloud/rest/workspaces
 Browse to [http://localhost:9090/geoserver/cloud/](http://localhost:9090/geoserver/cloud/)
 
 
+
+···####################### MODIFICAR ARCHIVO compose
+
+    volumes:
+      # override with the local copy to test config changes during development
+      - 
+      - ../config:/etc/geoserver:ro
+    deploy:
