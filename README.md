@@ -215,6 +215,12 @@ USAR JAVA 21+
     - jndi.yml
     - rabbitmq.conf
 
+
+##agregar en  ->  cd /config
+geoserver:
+  ......
+  backend:
+    ......
     resource-store:
       type: s3
       bucket: geoserver
