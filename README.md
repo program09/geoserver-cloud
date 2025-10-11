@@ -168,3 +168,61 @@ Browse to [http://localhost:9090/geoserver/cloud/](http://localhost:9090/geoserv
       - 
       - ../config:/etc/geoserver:ro
     deploy:
+
+
+
+
+USAR JAVA 21+
+ limpiar contenedores -> docker compose -f compose.yml -f catalog-pgconfig.yml down -v 
+ iniciar ->  docker compose -f compose.yml -f catalog-pgconfig.yml up -d --build
+
+ //uso minio con docker opcion a S3
+ //
+
+
+
+## FILES COMPOSE
+
+- cd compose
+    - .env
+    - acceptance.yml
+    - acceptance_datadir
+    - acceptance_jdbcconfig
+    - acceptance_pgconfig
+    - catalog-datadir.tgz
+    - catalog-datadir.yml
+    - catalog-jdbcconfig.yml
+    - catalog-pgconfig.yml
+    - compose.yml
+    - datadir
+    - infra.yml
+    - jdbcconfig
+    - localports.yml
+    - pgbouncer.yml
+    - pgconfig
+    - sampledata.tgz
+    - standalone.yml
+    - template.yml
+
+## FILES CONFIG
+- cd config
+    - /user_projections/epsg.properties
+    - config-service.yml
+    - gateway-service.yml
+    - geoserver.yml
+    - geoserver_logging.yml
+    - geoserver_spring.yml
+    - jndi.yml
+    - rabbitmq.conf
+
+    resource-store:
+      type: s3
+      bucket: geoserver
+      prefix: geoserver-data/
+      region: us-east-1
+      s3:
+        endpoint: http://host.docker.internal:9000
+        access-key: minioadmin
+        secret-key: minioadmin
+        path-style-access: true
+ 
