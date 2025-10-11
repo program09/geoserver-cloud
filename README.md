@@ -230,5 +230,5 @@ geoserver:
         endpoint: http://host.docker.internal:9000
         access-key: minioadmin
         secret-key: minioadmin
-        path-style-access: true
+        path-style-access: true  // false para s3
  
